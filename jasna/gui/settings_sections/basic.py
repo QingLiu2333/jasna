@@ -111,6 +111,7 @@ class BasicSection:
         self._widgets["fp16_mode"].select()
 
         compile_frame = ctk.CTkFrame(row4, fg_color=Colors.BG_CARD, corner_radius=6)
+        self._compile_frame = compile_frame
         add_setting_label(compile_frame, "compile_basicvsrpp", in_card=True)
         self._widgets["compile_basicvsrpp"] = CompactSwitch(
             compile_frame,
@@ -119,6 +120,7 @@ class BasicSection:
         )
         self._widgets["compile_basicvsrpp"].pack(side="right", padx=12, pady=8)
         self._widgets["compile_basicvsrpp"].select()
+        self._tensorrt_supported = True
 
         # File Conflict dropdown
         row5 = ctk.CTkFrame(inner, fg_color="transparent")
@@ -161,6 +163,27 @@ class BasicSection:
         pack_rows(self._rows, hidden)
         pack_rows(self._toggles, hidden)
 
+    def set_tensorrt_support(self, supported: bool) -> None:
+        """Disable the "Compile BasicVSR++" switch where TensorRT cannot run.
+
+        On a card the installed TensorRT cannot target (Pascal - compute 6.x -
+        or a tree with no TensorRT at all) the toggle would never do anything:
+        the PyTorch CUDA path is the only one available, and leaving the switch
+        on just promises a 15-60 minute compile that will not happen. Keep it
+        off and greyed out, and restore it when a capable card is selected.
+        """
+        self._tensorrt_supported = bool(supported)
+        switch = self._widgets["compile_basicvsrpp"]
+        if supported:
+            switch.configure(state="normal")
+        else:
+            switch.deselect()
+            switch.configure(state="disabled")
+
+    @property
+    def tensorrt_supported(self) -> bool:
+        return self._tensorrt_supported
+
     def _on_max_clip_size_slider(self, value: float):
         max_clip_size = int(value)
         self._widgets["max_clip_size_val"].configure(text=str(max_clip_size))
@@ -192,7 +215,7 @@ class BasicSection:
         else:
             self._widgets["fp16_mode"].deselect()
 
-        if preset.compile_basicvsrpp:
+        if preset.compile_basicvsrpp and self._tensorrt_supported:
             self._widgets["compile_basicvsrpp"].select()
         else:
             self._widgets["compile_basicvsrpp"].deselect()

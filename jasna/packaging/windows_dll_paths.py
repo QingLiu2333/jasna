@@ -95,15 +95,41 @@ def _iter_top_level_lib_dirs(root: Path) -> list[Path]:
     return out
 
 
+def _runtime_roots() -> list[Path]:
+    """Every directory that can hold the frozen build's native libraries.
+
+    Nuitka standalone keeps them at the dist root next to the binary; a
+    PyInstaller onedir build puts them in ``_internal/`` (``sys._MEIPASS``).
+    Both are checked so the loader works under either packer.
+    """
+    roots: list[Path] = []
+    try:
+        roots.append(Path(sys.executable).resolve().parent)
+    except OSError:  # pragma: no cover - defensive
+        pass
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        roots.append(Path(meipass).resolve())
+    app_dir = roots[0] if roots else None
+    if app_dir is not None:
+        roots.append(app_dir / "_internal")
+    seen: set[str] = set()
+    unique: list[Path] = []
+    for root in roots:
+        key = _norm(str(root))
+        if key and key not in seen:
+            seen.add(key)
+            unique.append(root)
+    return unique
+
+
 def configure_windows_dll_search_paths() -> None:
     if sys.platform != "win32" or not is_frozen():
         return
 
-    # Nuitka standalone keeps every lib at the dist root next to the binary — no
-    # PyInstaller _internal/ subdir and no _MEIPASS.
-    app_dir = Path(sys.executable).resolve().parent
-
-    preferred_dirs: list[str] = [str(p) for p in _iter_top_level_lib_dirs(app_dir)]
+    preferred_dirs: list[str] = []
+    for root in _runtime_roots():
+        preferred_dirs.extend(str(p) for p in _iter_top_level_lib_dirs(root))
 
     cuda_roots: list[str] = []
     for key in ["CUDA_PATH", "CUDA_HOME"]:

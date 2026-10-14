@@ -63,6 +63,7 @@ def decode_detect_loop(
     output_frame_count: int | None,
     output_fps: float | None,
     progress: Progressbar | None,
+    decode_device: str = "auto",
 ) -> None:
     timer = LoopTimer("decode-detect")
     try:
@@ -83,6 +84,7 @@ def decode_detect_loop(
                 device=device,
                 metadata=metadata,
                 frame_stride=frame_stride,
+                decode_device=decode_device,
             ) as reader,
             torch.inference_mode(),
         ):
@@ -337,6 +339,7 @@ def blend_encode_loop(
     vram_offloader: VramOffloader,
     seek_ts: float | None,
     frame_stride: int,
+    decode_device: str = "auto",
 ) -> None:
     timer = LoopTimer("blend-encode")
     try:
@@ -353,6 +356,7 @@ def blend_encode_loop(
             device=device,
             metadata=metadata,
             frame_stride=frame_stride,
+            decode_device=decode_device,
         ) as reader2:
             frame_gen = _flat_frames(reader2)
             secondary_done = False
@@ -726,6 +730,7 @@ def run_restoration_pass(
                 output_frame_count=output_frame_count,
                 output_fps=output_fps,
                 progress=progress,
+                decode_device=str(getattr(pipeline, "decode_backend", "auto")),
             ),
             name="DecodeDetect", daemon=True,
         ),
@@ -758,6 +763,7 @@ def run_restoration_pass(
                 vram_offloader=vram_offloader,
                 seek_ts=seek_ts,
                 frame_stride=frame_stride,
+                decode_device=str(getattr(pipeline, "decode_backend", "auto")),
             ),
             name="BlendEncode", daemon=True,
         ),

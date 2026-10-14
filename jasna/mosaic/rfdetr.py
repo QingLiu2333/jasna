@@ -10,7 +10,8 @@ from torch.nn import functional as F
 logger = logging.getLogger(__name__)
 
 from jasna.accelerator import is_amd_device, is_nvidia_device
-from jasna.engine_paths import get_onnx_tensorrt_engine_path
+from jasna.arch_compat import tensorrt_supports_device
+from jasna.engine_paths import get_detection_engine_path
 from jasna.media.resize_normalize import ResizeNormalizer
 from jasna.mosaic.detections import Detections
 from jasna.tensor_utils import pad_batch_with_last
@@ -43,6 +44,14 @@ def compile_rfdetr_engine(
         raise RuntimeError(
             f"RF-DETR is not supported on device backend {device.type!r}"
         )
+    if not tensorrt_supports_device(device):
+        # NVIDIA, but this TensorRT cannot target the card at all — Pascal is below
+        # the 10.x floor of 7.5, and Volta is below the 10.5 floor. The torch model
+        # is the only option, and attempting a compile would fail after minutes.
+        logger.info(
+            "TensorRT cannot build a detection engine for this GPU; using the rfdetr torch model"
+        )
+        return weights_path
 
     from jasna.trt import compile_onnx_to_tensorrt_engine
     return compile_onnx_to_tensorrt_engine(
@@ -52,6 +61,7 @@ def compile_rfdetr_engine(
         fp16=bool(fp16),
         workspace_gb=20,
         dynamic_batch=dynamic_batch,
+        kind="detection",
     )
 
 
@@ -85,10 +95,14 @@ class RfDetrMosaicDetectionModel:
         if self.batch_size <= 0:
             raise ValueError(f"batch_size must be > 0, got {batch_size}")
 
-        if is_amd_device(self.device):
+        nvidia = is_nvidia_device(self.device)
+        # A card this TensorRT cannot target (Pascal, or Volta on TRT 10.5+) has no
+        # engine path at all, so it runs the rfdetr torch model exactly as AMD does.
+        trt_usable = nvidia and tensorrt_supports_device(self.device)
+        if is_amd_device(self.device) or (nvidia and not trt_usable):
             if torch_variant is None:
                 raise RuntimeError(
-                    f"RF-DETR on AMD requires a torch variant for {weights_path.name}"
+                    f"RF-DETR without TensorRT requires a torch variant for {weights_path.name}"
                 )
             from jasna.mosaic.rfdetr_torch_runner import RfDetrTorchRunner
 
@@ -103,8 +117,8 @@ class RfDetrMosaicDetectionModel:
                 variant=torch_variant,
             )
             self.engine_path = self.weights_path
-        elif is_nvidia_device(self.device):
-            self.engine_path = get_onnx_tensorrt_engine_path(
+        elif trt_usable:
+            self.engine_path = get_detection_engine_path(
                 self.weights_path, batch_size=self.batch_size, fp16=bool(fp16),
                 dynamic_batch=self.dynamic_batch,
             )
@@ -113,13 +127,36 @@ class RfDetrMosaicDetectionModel:
                     f"RF-DETR engine not found: {self.engine_path}. "
                     "Run engine compilation first via ensure_engines_compiled()."
                 )
-            self.runner = TrtRunner(
-                self.engine_path,
-                input_shapes=[
-                    (self.batch_size, 3, self.resolution, self.resolution)
-                ],
-                device=self.device,
-            )
+            from jasna.trt.trt_runner import TrtEngineError
+
+            try:
+                self.runner = TrtRunner(
+                    self.engine_path,
+                    input_shapes=[
+                        (self.batch_size, 3, self.resolution, self.resolution)
+                    ],
+                    device=self.device,
+                )
+            except TrtEngineError as exc:
+                # The stored engine was built on another GPU (or another
+                # TensorRT build) and cannot run here. It has been moved aside;
+                # build one for this card and use that.
+                logger.warning("Rebuilding the RF-DETR engine for this GPU: %s", exc)
+                self.engine_path = compile_rfdetr_engine(
+                    self.weights_path,
+                    self.device,
+                    batch_size=self.batch_size,
+                    resolution=self.resolution,
+                    dynamic_batch=self.dynamic_batch,
+                    fp16=bool(fp16),
+                )
+                self.runner = TrtRunner(
+                    self.engine_path,
+                    input_shapes=[
+                        (self.batch_size, 3, self.resolution, self.resolution)
+                    ],
+                    device=self.device,
+                )
         else:
             raise RuntimeError(
                 f"RF-DETR is not supported on device backend {self.device.type!r}"

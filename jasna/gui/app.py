@@ -50,22 +50,44 @@ _MIN_WINDOW_SIZE = (900, 580)
 _SHUTDOWN_COUNTDOWN_SECONDS = 60
 
 
-def _warm_up_cuda() -> tuple[bool, bool]:
+def _warm_up_cuda() -> tuple[bool, bool, tuple[int, int] | None, bool]:
     """Import torch and create the CUDA context. Run off the UI thread after the window
     paints, so the window shows first and the first job skips cold torch/CUDA init.
     An unsupported GPU gets no kernel launch; the system check reports it instead.
-    Returns (NVIDIA GPU, Blackwell GPU) for the LTX model options."""
-    from jasna.os_utils import check_supported_gpu
+    Returns (NVIDIA GPU, block-quantized FP4/FP8 GEMMs available, compute capability,
+    TensorRT can target this GPU) for the LTX and BasicVSR++-compile options.
 
-    gpu_ok, _ = check_supported_gpu()
+    The second flag used to mean "Blackwell", because only Blackwell was assumed to have
+    the FP4/FP8 tensor-core GEMMs. It is now the real capability probe, so an Ada or
+    Hopper card — and any future architecture — gets the fast LTX variants too, and an
+    older card is told it will run the dequantized (slower, still correct) path rather
+    than being refused. The capability decides whether LTX is offered at all: Pascal and
+    older have no tensor cores, so every LTX layer would run dequantised.
+
+    The fourth flag drives the "Compile BasicVSR++" switch: where the installed
+    TensorRT cannot target the card (Pascal), the switch is locked off instead of
+    promising a 15-60 minute compile that can never happen."""
+    from jasna import os_utils
+
+    gpu_ok, _ = os_utils.check_supported_gpu()
     if not gpu_ok:
-        return False, False
+        return False, False, None, False
     import torch
     from jasna.accelerator import is_nvidia_device
 
-    torch.zeros(1, device="cuda")
+    torch.zeros(1, device=os_utils.compute_device())
     nvidia = is_nvidia_device()
-    return nvidia, nvidia and torch.cuda.get_device_capability(0)[0] >= 10
+    if not nvidia:
+        return False, False, None, False
+    capability = tuple(torch.cuda.get_device_capability(os_utils.compute_device_string()))
+    from jasna.arch_compat import supports_block_quantized_gemm, tensorrt_supports_device
+
+    return (
+        True,
+        bool(supports_block_quantized_gemm()),
+        capability,
+        bool(tensorrt_supports_device(os_utils.compute_device())),
+    )
 
 
 class JasnaApp(ctk.CTk, TkinterDnD.DnDWrapper):
@@ -111,6 +133,17 @@ class JasnaApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self._video_player_dialog = None
         self._closing_after_player = False
         self._preset_manager = PresetManager()
+
+        # Resolve the saved GPU choice before anything can look at a device. On a
+        # multi-GPU machine the pick decides which card runs the models, which
+        # per-GPU engine archive is used, and what the first-run checks inspect -
+        # and the checks (below, ~100 ms away) would otherwise judge card 0.
+        try:
+            from jasna import os_utils
+
+            os_utils.set_compute_device_index(self._preset_manager.get_compute_device())
+        except Exception:
+            logger.debug("Could not apply the saved compute device", exc_info=True)
 
         self._system_stats_stop = threading.Event()
         self._system_stats_thread: threading.Thread | None = None
@@ -404,13 +437,26 @@ class JasnaApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
     def _start_cuda_warmup(self):
         def _run():
+            # Apply the saved compute-device choice first: it decides which GPU
+            # (and therefore which per-GPU engine archive) every later step uses.
             try:
-                nvidia, blackwell = _warm_up_cuda()
+                from jasna.gui.models import set_compute_device
+
+                set_compute_device(self._settings_panel.compute_device_index())
+            except Exception:
+                logger.debug("Could not apply the saved compute device", exc_info=True)
+            try:
+                nvidia, blackwell, capability, tensorrt_ok = _warm_up_cuda()
             except Exception:
                 logger.warning("CUDA warm-up failed", exc_info=True)
-                nvidia, blackwell = False, False
+                nvidia, blackwell, capability, tensorrt_ok = False, False, None, False
             self._main_thread.post(
-                lambda: self._settings_panel.set_gpu_support(nvidia=nvidia, blackwell=blackwell)
+                lambda: self._settings_panel.set_gpu_support(
+                    nvidia=nvidia,
+                    blackwell=blackwell,
+                    capability=capability,
+                    tensorrt=tensorrt_ok,
+                )
             )
 
         threading.Thread(target=_run, daemon=True, name="cuda-warmup").start()
@@ -461,8 +507,11 @@ class JasnaApp(ctk.CTk, TkinterDnD.DnDWrapper):
             self.destroy()
         
     def _refresh_license_chip(self):
-        from jasna.protection import license_store
-        licensed = license_store.is_licensed()
+        # Safe when the private licensing module is absent (public source
+        # checkout / self-built binaries): the shim reports "not licensed".
+        from jasna._licensing import is_licensed
+
+        licensed = is_licensed()
         self._license_chip.configure(
             text=t("license_chip_active") if licensed else t("license_chip_inactive"),
             text_color=Colors.STATUS_COMPLETED if licensed else Colors.STATUS_WARNING,

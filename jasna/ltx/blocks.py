@@ -55,6 +55,46 @@ def _views(buffer: torch.Tensor, layout: dict[str, _Entry]) -> dict[str, torch.T
     }
 
 
+_host_pinning_reported = False
+
+
+def _alloc_host_buffer(nbytes: int) -> torch.Tensor:
+    """A host buffer for one streamed block, degrading gracefully.
+
+    Pinned (page-locked) memory makes the side-stream prefetch asynchronous and
+    fast, but it is also the one allocation here that the CUDA driver can
+    refuse: PyTorch's caching host allocator never returns cached pages to the
+    OS on its own, and earlier phases (the video decoder's batch buffers, for
+    one) leave plenty cached, so a multi-hundred-MiB request can hit a driver
+    or page-lock limit. When that happens, retry once after evicting the host
+    cache and, if the driver still refuses, run the streamed blocks from
+    pageable memory — the copies then synchronise internally, which is slower
+    but perfectly correct, and the job completes instead of failing.
+    """
+    global _host_pinning_reported
+    try:
+        return torch.empty(nbytes, dtype=torch.uint8, pin_memory=True)
+    except Exception as first:
+        logger.warning(
+            "Pinned allocation of %.0f MiB failed (%s); emptying the host cache and retrying",
+            nbytes / 2**20,
+            first,
+        )
+    try:
+        torch._C._host_emptyCache()
+        return torch.empty(nbytes, dtype=torch.uint8, pin_memory=True)
+    except Exception as second:
+        if not _host_pinning_reported:
+            _host_pinning_reported = True
+            logger.warning(
+                "Pinned memory still unavailable (%s); LTX streamed blocks will use pageable "
+                "host memory. Streams still work - the block copies just synchronise, so "
+                "throughput drops a little.",
+                second,
+            )
+        return torch.empty(nbytes, dtype=torch.uint8)
+
+
 class BlockStore:
     """Hands out each block's weights on ``device`` in a fixed cyclic block order."""
 
@@ -65,6 +105,12 @@ class BlockStore:
         self._layouts: list[dict[str, _Entry]] = []
         self._resident: list[dict[str, torch.Tensor]] = []
         self._host: list[torch.Tensor] = []
+        # Surfaced before the multi-hundred-MiB allocations below: CUDA errors are
+        # per-thread and only reported by the next checking call, so a stale
+        # asynchronous failure from an earlier pass shows up as a baffling
+        # "resource already mapped" attributed to the pinned allocation. If the
+        # context really is poisoned, fail here where the origin is visible.
+        torch.cuda.synchronize(self.device)
         slot_bytes = 0
         for index, tensors in enumerate(blocks):
             layout, nbytes = _layout(tensors)
@@ -74,7 +120,7 @@ class BlockStore:
                 _pack(tensors, layout, buffer)
                 self._resident.append(_views(buffer, layout))
             else:
-                buffer = torch.empty(nbytes, dtype=torch.uint8, pin_memory=True)
+                buffer = _alloc_host_buffer(nbytes)
                 _pack(tensors, layout, buffer)
                 self._host.append(buffer)
                 slot_bytes = max(slot_bytes, nbytes)

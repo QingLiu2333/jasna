@@ -143,6 +143,64 @@ def _build_secondary_restorer(config: SessionConfig, device: "torch.device"):
     raise ValueError(f"Unsupported secondary restoration: {config.secondary_restoration}")
 
 
+def _resolve_fp16(config: SessionConfig, device: "torch.device") -> bool:
+    """Whether fp16 is actually worth using on the device this session will run on.
+
+    On a card without Tensor Cores (Pascal, GTX 10xx) fp16 is emulated and slower
+    than fp32, so a stored "fp16 on" from another machine is downgraded instead of
+    being obeyed. On Volta it is honoured, with a note that the speedup is small.
+    """
+    if device.type != "cuda" or not config.fp16:
+        return bool(config.fp16)
+    try:
+        from jasna.arch_compat import recommended_fp16
+
+        use_fp16, note = recommended_fp16(True)
+    except Exception:
+        return bool(config.fp16)
+    if note:
+        logger.warning("fp16 setting adjusted for this GPU: %s", note)
+    return use_fp16
+
+
+def _apply_architecture_profile(device: "torch.device") -> None:
+    """Pin the per-GPU engine archive and report what this card can really run.
+
+    Compiled engines live under a directory keyed by the GPU's identity, so the
+    paths must be resolved for the device this session will actually use — not
+    for whatever device happens to be current — before any engine lookup.
+    """
+    from jasna.engine_paths import set_engine_device_index
+
+    index = device.index
+    if index is None and device.type == "cuda":
+        try:
+            import torch
+
+            index = torch.cuda.current_device()
+        except Exception:
+            index = 0
+    set_engine_device_index(index)
+    if device.type != "cuda":
+        return
+    try:
+        # Engines from a pre-archive install are only adopted when the user
+        # explicitly asks for it: a TensorRT plan is valid only on the card that
+        # built it, so a blind adoption leaves this card with engines that fail
+        # to load. See ``jasna.engine_paths.adopt_legacy_engines``.
+        from jasna.engine_paths import adopt_legacy_engines
+
+        adopt_legacy_engines()
+    except Exception:
+        logger.debug("Legacy engine adoption skipped", exc_info=True)
+    try:
+        from jasna.arch_compat import profile_for
+
+        logger.info("Compute profile: %s", profile_for().summary())
+    except Exception:
+        logger.debug("Could not build the architecture profile", exc_info=True)
+
+
 def build_restoration_session(
     config: SessionConfig,
     *,
@@ -163,6 +221,12 @@ def build_restoration_session(
         config.secondary_restoration != "none" or config.denoise_strength != "none"
     ):
         raise ValueError("LTX restoration does not support secondary restoration or denoise")
+    _apply_architecture_profile(device)
+    fp16 = _resolve_fp16(config, device)
+    if fp16 != bool(config.fp16):
+        import dataclasses
+
+        config = dataclasses.replace(config, fp16=fp16)
     session = RestorationSession(device=device, restoration_pipeline=None)
     provide_restoration_models(
         config, session, frozenset({config.restoration_model_name}), log_callback=log_callback
@@ -203,28 +267,59 @@ def _build_basicvsrpp_pipeline(
     from jasna.restorer.restoration_pipeline import RestorationPipeline
 
     model_path = _restoration_model_path(config, "basicvsrpp")
-    compile_result = ensure_engines_compiled(
-        EngineCompilationRequest(
-            device=str(device),
-            fp16=bool(config.fp16),
-            basicvsrpp=config.compile_basicvsrpp and not is_amd_device(device),
-            basicvsrpp_model_path=str(model_path),
-            detection=True,
-            detection_model_name=config.detection_model_name,
-            detection_model_path=str(config.detection_model_path),
-            detection_batch_size=int(config.batch_size),
-            unet4x=(config.secondary_restoration == "unet-4x"),
-        ),
-        log_callback=log_callback,
-    )
-    return RestorationPipeline(
-        restorer=BasicvsrppMosaicRestorer(
+
+    def build_restorer(use_tensorrt: bool) -> "BasicvsrppMosaicRestorer":
+        return BasicvsrppMosaicRestorer(
             checkpoint_path=str(model_path),
             device=device,
             max_clip_size=int(config.max_clip_size),
-            use_tensorrt=compile_result.use_basicvsrpp_tensorrt,
+            use_tensorrt=use_tensorrt,
             fp16=bool(config.fp16),
-        ),
+        )
+
+    def compile_engines() -> "EngineCompilationResult":
+        return ensure_engines_compiled(
+            EngineCompilationRequest(
+                device=str(device),
+                fp16=bool(config.fp16),
+                basicvsrpp=config.compile_basicvsrpp and not is_amd_device(device),
+                basicvsrpp_model_path=str(model_path),
+                detection=True,
+                detection_model_name=config.detection_model_name,
+                detection_model_path=str(config.detection_model_path),
+                detection_batch_size=int(config.batch_size),
+                unet4x=(config.secondary_restoration == "unet-4x"),
+            ),
+            log_callback=log_callback,
+        )
+
+    compile_result = compile_engines()
+    use_tensorrt = bool(compile_result.use_basicvsrpp_tensorrt)
+    if use_tensorrt:
+        from jasna.trt.torch_tensorrt_export import EngineArchiveError
+
+        try:
+            restorer = build_restorer(True)
+        except EngineArchiveError:
+            # The sub-engines that were on disk cannot run on this GPU (they were
+            # built elsewhere). The loader has already moved them aside, so a
+            # second compile pass builds them for this very card.
+            logger.warning("Rebuilding the BasicVSR++ engines for this GPU...")
+            compile_result = compile_engines()
+            use_tensorrt = bool(compile_result.use_basicvsrpp_tensorrt)
+            try:
+                restorer = build_restorer(use_tensorrt)
+            except EngineArchiveError:
+                logger.error(
+                    "Compiled engines still cannot be loaded; running the BasicVSR++ "
+                    "network in PyTorch for this job."
+                )
+                restorer = build_restorer(False)
+    else:
+        restorer = build_restorer(False)
+
+    return RestorationPipeline(
+        restorer=restorer,
         secondary_restorer=_build_secondary_restorer(config, device),
         denoise_strength=DenoiseStrength(config.denoise_strength),
         denoise_step=DenoiseStep(config.denoise_step),
@@ -241,7 +336,38 @@ def _ltx_model_files(
     from jasna.ltx.model_files import LtxModelFiles
 
     if config.ltx_fast and torch.cuda.get_device_capability(device)[0] < 10:
-        raise ValueError("The fast LTX model needs an RTX 50-series (Blackwell) GPU")
+        # The fast (NVFP4) LTX transformer is a 4-bit model, and its block-scaled
+        # GEMMs only exist on sm_89+. On anything older we can still run it, by
+        # dequantizing the weights for each matmul. That is several times slower
+        # and needs more VRAM than the tensor-core kernels, so it is offered
+        # rather than silently chosen: JASNA_LTX_QUANTIZED_ON_LEGACY=1 opts in.
+        from jasna.arch_compat import supports_block_quantized_gemm
+        import os as _os
+
+        capability = tuple(torch.cuda.get_device_capability(device))
+        if not supports_block_quantized_gemm():
+            allowed = _os.environ.get("JASNA_LTX_QUANTIZED_ON_LEGACY", "").strip().lower() not in {
+                "",
+                "0",
+                "false",
+                "no",
+                "off",
+            }
+            if not allowed:
+                raise ValueError(
+                    f"The fast (NVFP4) LTX model needs a GPU with block-quantized FP4/FP8 "
+                    f"tensor cores (compute capability 8.9+, i.e. RTX 40-series and newer). "
+                    f"Your GPU is {capability[0]}.{capability[1]}. Use the INT8/quality LTX "
+                    f"model instead, or set JASNA_LTX_QUANTIZED_ON_LEGACY=1 to run the FP4 "
+                    f"model with slow dequantized matmuls."
+                )
+            logger.warning(
+                "LTX fast (NVFP4) model on compute capability %d.%d: the FP4 tensor-core GEMMs "
+                "are unavailable, so every quantized layer will be dequantized and run in bf16. "
+                "Correct output, several times slower, and it needs more VRAM.",
+                capability[0],
+                capability[1],
+            )
     if config.ltx_trial:
         from jasna.ltx.model_files import LTX_TRIAL_NOTICE
 

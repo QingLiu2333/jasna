@@ -49,10 +49,33 @@ def read_install_state(directory: Path) -> LtxInstallState:
     )
 
 
-def card_unavailable_reason(*, nvidia: bool | None) -> str | None:
+def _capability_tuple(capability) -> tuple[int, int] | None:
+    if capability is None:
+        return None
+    try:
+        major, minor = capability
+        return int(major), int(minor)
+    except (TypeError, ValueError):
+        return None
+
+
+def card_unavailable_reason(*, nvidia: bool | None, capability=None) -> str | None:
     """Locale key saying why the LTX card cannot be picked; ``nvidia`` is None until the GPU is known.
-    Without model files LTX still runs as a trial."""
-    return "model_ltx_needs_nvidia" if nvidia is False else None
+    Without model files LTX still runs as a trial.
+
+    LTX is refused on Pascal and older for a concrete reason: the transformer is built
+    around tensor cores, and a card without them evaluates every layer through the
+    dequantised fallback — correct output at a speed that makes a real video
+    impractical. Volta (7.0) has first-generation tensor cores and stays available.
+    """
+    from jasna.arch_compat import VOLTA
+
+    if nvidia is False:
+        return "model_ltx_needs_nvidia"
+    resolved = _capability_tuple(capability)
+    if resolved is not None and resolved < VOLTA:
+        return "model_ltx_needs_tensor_cores"
+    return None
 
 
 def trial_only(state: LtxInstallState) -> bool:
@@ -60,12 +83,48 @@ def trial_only(state: LtxInstallState) -> bool:
     return not any(state.usable(model, fast) for model in LTX_MODELS for fast in (False, True))
 
 
+def fast_unavailable_reason(*, gemms_available: bool | None = None) -> str | None:
+    """Locale key saying why LTX fast mode cannot be chosen; None when it can.
+
+    Fast mode is the NVFP4 (W4A4) transformer, so it needs block-scaled FP4/FP8
+    tensor-core GEMMs. ``session_factory`` already refuses the combination at run
+    time, which is too late to be useful: the switch must not be offered when the
+    run would be rejected. ``JASNA_LTX_QUANTIZED_ON_LEGACY=1`` opts back in.
+    """
+    import os
+
+    if os.environ.get("JASNA_LTX_QUANTIZED_ON_LEGACY", "").strip().lower() not in {
+        "",
+        "0",
+        "false",
+        "no",
+        "off",
+    }:
+        return None
+    if gemms_available is None:
+        from jasna.arch_compat import supports_block_quantized_gemm
+
+        gemms_available = supports_block_quantized_gemm()
+    return None if gemms_available else "model_ltx_fast_needs_fp4"
+
+
 def run_unavailable_reason(
-    state: LtxInstallState, model: LtxModelName, fast: bool, *, nvidia: bool | None, trial: bool
+    state: LtxInstallState,
+    model: LtxModelName,
+    fast: bool,
+    *,
+    nvidia: bool | None,
+    trial: bool,
+    capability=None,
 ) -> str | None:
     """Locale key saying why LTX cannot restore right now with this variant."""
+    from jasna.arch_compat import VOLTA
+
     if nvidia is False:
         return "model_ltx_needs_nvidia"
+    resolved = _capability_tuple(capability)
+    if resolved is not None and resolved < VOLTA:
+        return "model_ltx_needs_tensor_cores"
     if trial or state.installed(model, fast):
         return None
     return "model_ltx_not_downloaded" if state.downloadable else "model_ltx_not_installed"

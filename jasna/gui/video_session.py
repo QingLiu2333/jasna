@@ -58,6 +58,7 @@ def video_session_config(
     codec: str,
     encoder_settings: Mapping[str, object],
 ) -> SessionConfig:
+    from jasna import os_utils
     from jasna.engine_paths import default_restoration_model_path
     from jasna.mosaic.detection_registry import coerce_detection_model_name, require_detection_model_weights
 
@@ -65,7 +66,7 @@ def video_session_config(
     standard_model = settings.restoration_model == "basicvsrpp"
     secondary_restoration = settings.secondary_restoration if standard_model else "none"
     return SessionConfig(
-        device="cuda:0",
+        device=os_utils.compute_device_string(),
         fp16=bool(settings.fp16_mode),
         batch_size=int(settings.batch_size),
         detection_model_name=det_name,
@@ -143,7 +144,9 @@ def build_image_session(
     _install_noise_filters()
     if not bundle_present(SD15_DIR):
         raise FileNotFoundError(t("interactive_model_missing"))
-    device = torch.device("cuda:0")
+    from jasna import os_utils
+
+    device = os_utils.compute_device()
     detection_model_name, detection_model_path, _ = resolve_detection_model(
         str(settings.detection_model), "", None
     )

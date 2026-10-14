@@ -54,7 +54,12 @@ def _cleanup_torch(torch_mod) -> None:
 def build_job_encoder_settings(settings: AppSettings, codec: str) -> dict:
     # Built per job (not cached in the video session) so a codec change
     # between queued jobs is always validated against the selected codec.
-    from jasna.accelerator import AcceleratorVendor, vendor_for_device
+    from jasna.accelerator import vendor_for_device
+    from jasna.media.codec_backend import (
+        effective_codec_backend,
+        last_encoder_choice,
+        resolve_codec_backend,
+    )
     from jasna.media.encoder_settings import (
         encoder_cq_spec,
         parse_encoder_settings,
@@ -62,7 +67,16 @@ def build_job_encoder_settings(settings: AppSettings, codec: str) -> dict:
         validate_encoder_settings,
     )
 
-    vendor = vendor_for_device()
+    # Validate against the codec backend that will really encode, so QSV/CPU
+    # option names and CQ ranges are accepted when that backend is selected.
+    compute_vendor = str(vendor_for_device())
+    cached = last_encoder_choice(codec)
+    if cached is not None:
+        vendor = cached.backend.value
+    else:
+        vendor = effective_codec_backend(
+            resolve_codec_backend(None), compute_vendor=compute_vendor
+        ).value
     cq = (
         encoder_cq_spec(codec, vendor).default
         if settings.encoder_cq is None
@@ -73,7 +87,7 @@ def build_job_encoder_settings(settings: AppSettings, codec: str) -> dict:
     if settings.encoder_custom_args:
         custom_settings = parse_encoder_settings(settings.encoder_custom_args)
         cq_aliases = {"cq"}
-        if vendor is AcceleratorVendor.AMD:
+        if vendor == "amd":
             cq_aliases.add("qvbr_quality_level")
         duplicates = sorted(cq_aliases & custom_settings.keys())
         if duplicates:

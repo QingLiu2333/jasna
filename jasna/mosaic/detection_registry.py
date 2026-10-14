@@ -89,10 +89,24 @@ _RFDETR_PATTERN = re.compile(r"^rfdetr-.+$")
 
 
 def rfdetr_weights_suffix() -> str:
-    """AMD runs RF-DETR from the trained torch checkpoint (``.pt``); NVIDIA
-    compiles the ONNX export to TensorRT (``.onnx``). Resolved from the active
-    accelerator vendor — release binaries are vendor-specific."""
-    return ".pt" if is_amd_device() else ".onnx"
+    """Which RF-DETR checkpoint this runtime runs.
+
+    The suffix follows the *runner*, not the vendor: ``.pt`` when the trained torch
+    model is what executes (AMD, and an NVIDIA card the installed TensorRT cannot
+    target — a Pascal card in the TensorRT-free legacy tree), ``.onnx`` when the
+    ONNX export is compiled to TensorRT. Keying this on the vendor alone sent an
+    ``.onnx`` file into ``torch.load`` on the legacy tree, which fails with
+    ``UnpicklingError: invalid load key``.
+
+    Returns the suffix the runtime *would* use; whether the matching file is
+    installed is a separate question, answered by
+    ``require_detection_model_weights``.
+    """
+    from jasna.arch_compat import tensorrt_supports_device
+
+    if is_amd_device() or not tensorrt_supports_device():
+        return ".pt"
+    return ".onnx"
 
 
 def is_rfdetr_model(name: str) -> bool:

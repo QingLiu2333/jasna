@@ -4,13 +4,34 @@ import logging
 import sys
 from pathlib import Path
 
-import tensorrt as trt
+try:
+    import tensorrt as trt
+except ImportError:  # pragma: no cover - only in the TensorRT-free build
+    # The legacy runtime tree (Pascal/Volta) ships without TensorRT: TensorRT 10.x
+    # cannot compile for those cards at all, so carrying ~2 GiB of it there would be
+    # dead weight. Every caller checks ``tensorrt_supports_device()`` first, so this
+    # module must import cleanly with ``trt`` absent.
+    trt = None
 import torch
 
-_TRT_LOGGER = trt.Logger(trt.Logger.ERROR)
+_TRT_LOGGER = trt.Logger(trt.Logger.ERROR) if trt is not None else None
 
 
-def get_trt_logger() -> trt.ILogger:
+def tensorrt_available() -> bool:
+    """False in the TensorRT-free build."""
+    return trt is not None
+
+
+def require_tensorrt() -> None:
+    if trt is None:
+        raise RuntimeError(
+            "This Jasna build has no TensorRT: it targets cards the TensorRT 10.x line "
+            "cannot compile for. The PyTorch models are used instead."
+        )
+
+
+def get_trt_logger():
+    require_tensorrt()
     torchtrt = sys.modules.get("torch_tensorrt")
     if torchtrt is not None:
         return torchtrt.logging.TRT_LOGGER
@@ -151,10 +172,12 @@ def compile_onnx_to_tensorrt_engine(
     optimization_level: int = 5,
     workspace_gb: int,
     dynamic_batch: bool = False,
+    kind: str = "onnx",
 ) -> Path:
     onnx_path = Path(onnx_path)
     engine_path = get_onnx_tensorrt_engine_path(
         onnx_path, batch_size=batch_size, fp16=bool(fp16), dynamic_batch=dynamic_batch,
+        kind=kind,
     )
 
     if engine_path.exists():
@@ -196,7 +219,14 @@ def compile_onnx_bytes_to_encrypted_engine(
     optimization_level: int = 5,
     workspace_gb: int,
 ) -> Path:
-    from jasna.protection import protected_model
+    from jasna._licensing import LicenseUnavailableError, protection_module
+
+    protected_model = getattr(protection_module(), "protected_model", None)
+    if protected_model is None:
+        raise LicenseUnavailableError(
+            f"Compiling the encrypted engine for '{model_id}' needs the licensing "
+            "module, which this build does not include."
+        )
 
     if engine_path.exists():
         return engine_path

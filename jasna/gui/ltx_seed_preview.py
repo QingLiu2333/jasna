@@ -349,6 +349,7 @@ def _lut_applier(settings: AppSettings):
     lut_path = (settings.lut_path or "").strip()
     if not lut_path:
         return None
+    from jasna import os_utils
     from jasna.media.lut import GpuLutApplier, parse_cube_file
 
-    return GpuLutApplier(parse_cube_file(lut_path), torch.device("cuda:0"))
+    return GpuLutApplier(parse_cube_file(lut_path), os_utils.compute_device())

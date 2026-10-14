@@ -106,7 +106,15 @@ def int8_linear(
 ) -> torch.Tensor:
     """ConvRot W8A8: rotate, quantize per token, INT8 tensor-core GEMM, rescale.
     Rows run in chunks of ``CHUNK_ROWS``; every step is per row, so chunking only caps
-    the fp32/int32 temporaries."""
+    the fp32/int32 temporaries.
+
+    On a card without ``torch._int_mm`` (pre-Turing) the same math runs through the
+    dequantized fallback in :mod:`jasna.arch_compat` instead."""
+    from jasna.arch_compat import dequantized_int8_linear, supports_int8_mm
+
+    if not supports_int8_mm():
+        return dequantized_int8_linear(x, qdata, scales, bias)
+
     out_features, in_features = qdata.shape
     flat = x.reshape(-1, in_features)
     out = torch.empty(flat.shape[0], out_features, dtype=x.dtype, device=x.device)
@@ -167,7 +175,16 @@ def nvfp4_linear(
 ) -> torch.Tensor:
     """NVFP4 W4A4: activations quantized per call (one dynamic tensor scale for the call), then
     the block-scaled FP4 tensor-core GEMM. Both operands pack high nibble first; the block scale
-    covers whole pairs, so the order only permutes each dot product's terms."""
+    covers whole pairs, so the order only permutes each dot product's terms.
+
+    The block-scaled GEMM itself only exists on sm_89+; elsewhere the same quantized
+    operands are dequantized and multiplied in bf16, which is slower but produces the
+    same low-precision result (see :mod:`jasna.arch_compat`)."""
+    from jasna.arch_compat import dequantized_nvfp4_linear, supports_block_quantized_gemm
+
+    if not supports_block_quantized_gemm():
+        return dequantized_nvfp4_linear(x, weight, block_scales, tensor_scale, bias)
+
     out_features = weight.shape[0]
     flat = x.reshape(-1, weight.shape[1] * 2)
     out = torch.empty(flat.shape[0], out_features, dtype=x.dtype, device=x.device)

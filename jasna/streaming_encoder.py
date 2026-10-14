@@ -9,7 +9,12 @@ from pathlib import Path
 
 import torch
 
-from jasna.accelerator import AcceleratorVendor, vendor_for_device
+from jasna.accelerator import vendor_for_device
+from jasna.media.codec_backend import (
+    CodecBackend,
+    effective_codec_backend,
+    resolve_codec_backend,
+)
 from jasna.media.probe import VideoMetadata
 from jasna.os_utils import find_executable, subprocess_no_window_kwargs
 
@@ -33,12 +38,28 @@ class StreamingEncoder:
         metadata: VideoMetadata,
         source_video: str,
         device: torch.device | None = None,
+        codec_backend: object | None = None,
     ):
         self.segments_dir = Path(segments_dir)
         self.segment_duration = float(segment_duration)
         self.metadata = metadata
         self.source_video = source_video
         self._vendor = vendor_for_device(device)
+        # HLS output is H.264 only, so the encode backend picks the qsv/cpu
+        # branch below. ``auto`` follows the compute GPU, matching the
+        # offline encoder whenever an encode choice was already made.
+        requested = resolve_codec_backend(codec_backend)
+        if requested is CodecBackend.AUTO:
+            from jasna.media.codec_backend import last_encoder_choice
+
+            cached = last_encoder_choice("h264")
+            self._codec_backend = (
+                cached.backend if cached is not None else effective_codec_backend(
+                    requested, compute_vendor=str(self._vendor)
+                )
+            )
+        else:
+            self._codec_backend = requested
 
         self._width = metadata.video_width
         self._height = metadata.video_height
@@ -155,13 +176,35 @@ class StreamingEncoder:
         else:
             cmd += ['-map', '0:v:0']
 
-        if self._vendor is AcceleratorVendor.AMD:
+        if self._codec_backend is CodecBackend.AMD:
             cmd += [
                 '-c:v', 'h264_amf',
                 '-usage', 'lowlatency_high_quality',
                 '-quality', 'balanced',
                 '-rc', 'qvbr',
                 '-qvbr_quality_level', '19',
+                '-bf', '0',
+                '-profile:v', 'high',
+                '-g', str(self._gop_size),
+                '-pix_fmt', 'yuv420p',
+            ]
+        elif self._codec_backend is CodecBackend.QSV:
+            # QSV ingests system-memory frames and does its own upload, so the
+            # rawvideo RGB input is converted to NV12 on the CPU first.
+            cmd += [
+                '-c:v', 'h264_qsv',
+                '-preset', 'veryfast',
+                '-global_quality', '19',
+                '-bf', '0',
+                '-profile:v', 'high',
+                '-g', str(self._gop_size),
+                '-pix_fmt', 'nv12',
+            ]
+        elif self._codec_backend is CodecBackend.CPU:
+            cmd += [
+                '-c:v', 'libx264',
+                '-preset', 'veryfast',
+                '-crf', '19',
                 '-bf', '0',
                 '-profile:v', 'high',
                 '-g', str(self._gop_size),

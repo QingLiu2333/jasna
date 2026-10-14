@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from ultralytics.utils import nms, ops
 
 from jasna.accelerator import is_nvidia_device
+from jasna.arch_compat import tensorrt_supports_device
 from jasna.engine_paths import get_yolo_tensorrt_engine_path
 from jasna.media.resize_normalize import ResizeNormalizer
 from jasna.mosaic.detections import Detections
@@ -158,13 +159,16 @@ class YoloMosaicDetectionModel:
         self.input_dtype = torch.float16 if self.fp16 else torch.float32
 
         runtime_path = self.model_path
-        if is_nvidia_device(self.device):
+        if is_nvidia_device(self.device) and tensorrt_supports_device(self.device):
             runtime_path = get_yolo_tensorrt_engine_path(self.model_path, fp16=self.fp16)
             if not runtime_path.exists():
                 raise FileNotFoundError(
                     f"YOLO engine not found: {runtime_path}. "
                     "Run engine compilation first via ensure_engines_compiled()."
                 )
+        # Without an engine — AMD, or an NVIDIA card the installed TensorRT cannot
+        # target — the .pt checkpoint runs through ultralytics directly, which is
+        # what the AutoBackend branch below is for.
 
         if runtime_path.suffix.lower() == ".engine":
             self.runner = TrtRunner(

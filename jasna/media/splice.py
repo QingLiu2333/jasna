@@ -225,9 +225,33 @@ def _amf_h264_settings(
     }
 
 
+def _qsv_h264_settings(
+    profile: str,
+    index: KeyframeIndex,
+) -> dict[str, object]:
+    # QSV matches the source profile and B-frame count; it has no b_ref_mode.
+    return {
+        "profile": H264_SMART_PROFILES[profile],
+        "bf": index.max_b_frames,
+    }
+
+
+def _software_h264_settings(
+    profile: str,
+    index: KeyframeIndex,
+) -> dict[str, object]:
+    # libx264 takes the same profile and B-frame count.
+    return {
+        "profile": H264_SMART_PROFILES[profile],
+        "bf": index.max_b_frames,
+    }
+
+
 _H264_SETTINGS_BY_VENDOR = {
-    AcceleratorVendor.NVIDIA: _nvenc_h264_settings,
-    AcceleratorVendor.AMD: _amf_h264_settings,
+    "nvidia": _nvenc_h264_settings,
+    "amd": _amf_h264_settings,
+    "qsv": _qsv_h264_settings,
+    "cpu": _software_h264_settings,
 }
 
 
@@ -237,7 +261,7 @@ def resolve_smart_encoder_settings(
     index: KeyframeIndex,
     settings: dict[str, object],
     *,
-    vendor: AcceleratorVendor,
+    vendor: "AcceleratorVendor | str",
 ) -> dict[str, object]:
     resolved = dict(settings)
     source_gop_size = _source_gop_size(index, metadata.video_fps_exact)
@@ -252,11 +276,14 @@ def resolve_smart_encoder_settings(
         raise SmartRenderCompatibilityError(
             f"Smart rendering cannot match H.264 profile {metadata.profile!r}"
         )
+    # Keyed by codec-backend name string: AcceleratorVendor members are StrEnums,
+    # so they arrive here as "nvidia"/"amd" unchanged.
+    backend = str(vendor).strip().lower()
     try:
-        h264_settings = _H264_SETTINGS_BY_VENDOR[vendor](profile, index)
+        h264_settings = _H264_SETTINGS_BY_VENDOR[backend](profile, index)
     except KeyError as exc:
         raise SmartRenderCompatibilityError(
-            f"Smart rendering is not supported on {vendor.value} encoders"
+            f"Smart rendering is not supported on {backend} encoders"
         ) from exc
     resolved.update(h264_settings)
     return resolved

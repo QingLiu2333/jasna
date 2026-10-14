@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 import psutil
 import torch
 
-from jasna.accelerator import AcceleratorVendor, vendor_for_device
+from jasna.accelerator import vendor_for_device
 from jasna.media.container_utils import MOV_SUFFIXES
 from jasna.media.probe import UnsupportedColorspaceError, get_video_meta_data
 from jasna.media.video_encoder import VideoEncoder
@@ -114,6 +114,9 @@ class Pipeline:
         self.sharpen_strength = config.sharpen_strength
         self.retarget_high_fps = config.retarget_high_fps
         self.fmp4 = config.fmp4
+        self.codec_backend = str(getattr(config, "codec_backend", "auto"))
+        # Decoding can be pinned to a different device than encoding.
+        self.decode_backend = str(getattr(config, "decode_backend", "auto"))
         self.segments = tuple(segments) if segments else None
         self.splice_plan = splice_plan
         self.vr_resolution = None
@@ -258,6 +261,7 @@ class Pipeline:
             sharpen_strength=self.sharpen_strength,
             output_fps=frame_rate.output_fps,
             fmp4=self.fmp4,
+            codec_backend=self.codec_backend,
         )
 
     def _run_full(
@@ -428,20 +432,36 @@ class Pipeline:
         for segments in segments_of.values():
             require_one_model(segments)
         ltx_spans = {span for span, segments in segments_of.items() if segments[0].restoration.model == "ltx"}
-        # AMF's H.264 encoder caps at 3 consecutive B-frames, so it cannot
+        # AMF's and QSV's H.264 encoders cap consecutive B-frames, so they cannot
         # match sources using more; re-render segments would not stitch
         # cleanly against the stream-copied ones. Fall back to a full
-        # re-encode instead of failing the job (NVIDIA NVENC has no such cap).
+        # re-encode instead of failing the job (NVIDIA NVENC and libx264 have no
+        # such cap).
+        from jasna.media.codec_backend import (
+            CodecBackend,
+            choose_encoder_backend,
+            resolve_codec_backend as resolve_codec_backend_name,
+        )
+
+        compute_vendor = str(vendor_for_device(self.device))
+        encode_choice = choose_encoder_backend(
+            resolve_codec_backend_name(self.codec_backend),
+            compute_vendor=compute_vendor,
+            codec=codec,
+            width=int(metadata.video_width),
+            height=int(metadata.video_height),
+        )
         if (
-            vendor_for_device(self.device) is AcceleratorVendor.AMD
+            encode_choice.backend in {CodecBackend.AMD, CodecBackend.QSV}
             and codec == "h264"
             and index.max_b_frames > 3
         ):
             log.warning(
-                "%s uses %d consecutive B-frames; AMF H.264 smart rendering supports "
+                "%s uses %d consecutive B-frames; %s H.264 smart rendering supports "
                 "at most 3, falling back to a full re-encode",
                 self.input_video,
                 index.max_b_frames,
+                encode_choice.backend.value.upper(),
             )
             self._run_full(
                 metadata,
@@ -457,7 +477,7 @@ class Pipeline:
             metadata,
             index,
             self.encoder_settings,
-            vendor=vendor_for_device(self.device),
+            vendor=encode_choice.backend.value,
         )
         standard_frames = sum(
             _span_frames(span, index, metadata) for span in plan.render_spans if span not in ltx_spans
@@ -506,6 +526,7 @@ class Pipeline:
                         output_fps=metadata.video_fps_exact,
                         pts_origin=span.start_pts,
                         smart_fragment=True,
+                        codec_backend=self.codec_backend,
                     )
 
                 def fragment_writer(span_index: int, span: SpliceSpan) -> Callable[[], _OfflineFrameWriter]:

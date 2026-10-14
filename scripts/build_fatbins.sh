@@ -5,9 +5,16 @@
 #   scripts/build_fatbins.sh              # all kernels
 #   scripts/build_fatbins.sh cas          # just jasna/media/cas.cu
 #
-# CUDA 13 rejects host compilers newer than GCC 15, hence CCBIN. PTX is
-# embedded for compute_75 only, so architectures newer than the SASS list
-# still load through the driver's JIT.
+# CUDA 13 rejects host compilers newer than GCC 15, hence CCBIN. This script
+# covers compute_75 and newer (PTX for 75 only; newer architectures load
+# through the driver's JIT).
+#
+# Legacy coverage (Pascal sm_60/61/62, Volta sm_70/72) is added on Windows by
+# ``tools/build_legacy_kernels.py`` *after* this script: CUDA 13 refuses every
+# target below 7.5, so that tool compiles *native SASS* for the legacy range
+# with the NVRTC that ships inside the CUDA 12.6 tree and repacks each fatbin
+# as "SASS sm_60..sm_72 + SASS sm_75..sm_121 + PTX compute_60,75". Run this
+# script first, then the tool, then tools/verify_legacy_kernels.py.
 set -euo pipefail
 
 CCBIN="${CCBIN:-g++-15}"

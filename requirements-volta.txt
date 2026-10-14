@@ -1,0 +1,36 @@
+# Runtime recipe for the Volta (compute capability 7.0) tree.
+#
+# Why this exists:
+#   * CUDA 13 dropped offline compilation below compute capability 7.5, so the
+#     modern (cu130) tree cannot serve Volta.
+#   * torch_tensorrt pins TensorRT tightly: 2.6 -> 10.7-10.8, 2.11 -> 10.15-10.16,
+#     2.14 -> 11.1-11.2. Only torch_tensorrt 2.5.0 accepts the TensorRT 10.0-10.4
+#     line, and 10.4 is the newest TensorRT that still supports Volta
+#     (support was removed in TensorRT 10.5).
+#   * torch 2.5.1+cu124 is the matching torch release (torch-tensorrt 2.5.0
+#     requires torch>=2.5.0,<2.6.0) and its wheel list still contains sm_70.
+#
+# Recreate with:
+#   py -3.12 -m venv D:\jasna2\venv_volta
+#   D:\jasna2\venv_volta\Scripts\python.exe -m pip install ^
+#       torch==2.5.1 torchvision==0.20.1 ^
+#       --index-url https://download.pytorch.org/whl/cu124
+#   D:\jasna2\venv_volta\Scripts\python.exe -m pip install ^
+#       torch-tensorrt==2.5.0 ^
+#       --index-url https://download.pytorch.org/whl/cu124 --extra-index-url https://pypi.org/simple
+#   D:\jasna2\venv_volta\Scripts\python.exe -m pip install ^
+#       tensorrt-cu12==10.3.0 tensorrt-cu12-bindings==10.3.0 tensorrt-cu12-libs==10.3.0 ^
+#       --extra-index-url https://pypi.nvidia.com --extra-index-url https://pypi.org/simple
+#   D:\jasna2\venv_volta\Scripts\python.exe -m pip install -r D:\jasna2\build\reqs_volta.txt
+#   D:\jasna2\venv_volta\Scripts\python.exe -m pip install -e D:\jasna2\work --no-deps
+#   D:\jasna2\venv_volta\Scripts\python.exe -m pip install ^
+#       pyinstaller==6.22.3 pyinstaller-hooks-contrib==2026.8
+#
+# IMPORTANT: install the app dependency list AFTER torch, and pin torch with a
+# constraint file (-c) if anything in it tries to drag torch forward - a
+# torch-tensorrt 2.5 DLL will not load against a newer torch.
+
+torch==2.5.1
+torchvision==0.20.1
+torch-tensorrt==2.5.0
+tensorrt-cu12==10.3.0

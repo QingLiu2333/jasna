@@ -443,11 +443,12 @@ class MosaicScanWorker:
         _install_noise_filters()
         import torch
 
+        from jasna import os_utils
         from jasna.mosaic.detection_registry import resolve_detection_model
         from jasna.session_factory import build_compiled_detection_model
 
         settings = self.settings
-        device = torch.device("cuda:0")
+        device = os_utils.compute_device()
         detection_model_name, detection_model_path, _ = resolve_detection_model(
             str(settings.detection_model), "", None
         )
@@ -480,10 +481,11 @@ class MosaicScanWorker:
         import torch
 
         from jasna.accelerator import is_amd_device
+        from jasna import os_utils
         from jasna.media.video_decoder import VideoReader
 
         metadata = self.metadata
-        device = torch.device("cuda:0")
+        device = os_utils.compute_device()
         duration = float(metadata.duration)
         time_base = float(metadata.time_base)
         frame_stride = scan_sample_stride(metadata.video_fps, seconds=self.stride_seconds)
@@ -660,10 +662,11 @@ class MosaicScanWorker:
     def _detect_mask(self, detector, command: _MaskRequest) -> ScanMaskReady:
         import torch
 
+        from jasna import os_utils
         from jasna.media.video_decoder import VideoReader
 
         metadata = self.metadata
-        device = torch.device("cuda:0")
+        device = os_utils.compute_device()
         batch_size = int(self.settings.batch_size)
         reader = VideoReader(
             str(self.path),

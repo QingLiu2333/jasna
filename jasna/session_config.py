@@ -71,6 +71,12 @@ class SessionConfig:
     fmp4: bool
     sharpen_strength: float
     tvai_denoise: bool
+    # Which device does the video codec work (NVENC/NVDEC, Intel QSV, AMF, or
+    # software). "auto" follows the compute GPU unless the user picked one.
+    codec_backend: str = "auto"
+    # Which device decodes. "auto" follows the encoder; anything else pins
+    # decoding to that device on its own.
+    decode_backend: str = "auto"
 
     def __post_init__(self) -> None:
         if self.batch_size <= 0:

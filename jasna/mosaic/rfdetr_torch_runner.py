@@ -56,8 +56,13 @@ class RfDetrTorchRunner:
         try:
             import rfdetr
         except ImportError as exc:
+            # Reached on AMD, and on an NVIDIA card where no TensorRT engine can
+            # exist (the CUDA 12.6 legacy tree): both run RF-DETR as a torch model
+            # instead of a compiled engine, and both need this package for it.
             raise RuntimeError(
-                "RF-DETR on AMD requires the rfdetr package (jasna[amd])"
+                "RF-DETR runs as a torch model on this build, which needs the "
+                "rfdetr package (jasna[amd]); TensorRT is either unavailable (no "
+                "supported GPU) or not installed in this runtime."
             ) from exc
 
         cls_name = _VARIANT_CLASSES.get(variant)

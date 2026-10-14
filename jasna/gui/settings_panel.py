@@ -221,16 +221,20 @@ class SettingsPanel(ctk.CTkFrame):
             self._on_restoration_model_changed,
             ltx_models=ltx_models,
         )
+        self._basic_section = BasicSection(
+            self._scroll,
+            self._widgets,
+            self._mark_modified,
+            self._sync_temporal_filter_limits,
+        )
         self._model_aware_sections = [
-            BasicSection(
-                self._scroll,
-                self._widgets,
-                self._mark_modified,
-                self._sync_temporal_filter_limits,
-            ),
+            self._basic_section,
             AdvancedSection(self._scroll, self._widgets, self._mark_modified),
             SecondarySection(self._scroll, self._widgets),
         ]
+        self._encoding_section = EncodingSection(
+            self._scroll, self._widgets, self._mark_modified, self._preset_manager
+        )
         self._sections = [
             self._model_section,
             *self._model_aware_sections,
@@ -241,9 +245,12 @@ class SettingsPanel(ctk.CTkFrame):
                 self._show_toast,
                 self._open_interactive_image_restore,
             ),
-            EncodingSection(self._scroll, self._widgets, self._mark_modified),
+            self._encoding_section,
             PostExportSection(self._scroll, self._widgets, self._mark_modified),
         ]
+        # Annotate the codec-device list with what this machine can really
+        # encode; runs in the background so the window opens immediately.
+        self._encoding_section.start_capability_probe()
 
     def _on_restoration_model_changed(self, model: str):
         for section in self._model_aware_sections:
@@ -261,9 +268,27 @@ class SettingsPanel(ctk.CTkFrame):
         self._model_section.refresh()
         self._update_modified_indicator()
 
-    def set_gpu_support(self, *, nvidia: bool, blackwell: bool):
-        self._model_section.set_gpu_support(nvidia=nvidia, blackwell=blackwell)
+    def set_gpu_support(
+        self,
+        *,
+        nvidia: bool,
+        blackwell: bool,
+        capability: tuple[int, int] | None = None,
+        tensorrt: bool = True,
+    ):
+        self._model_section.set_gpu_support(nvidia=nvidia, blackwell=blackwell, capability=capability)
+        self._basic_section.set_tensorrt_support(tensorrt)
         self._update_modified_indicator()
+
+    def compute_device_index(self) -> int:
+        """The CUDA device index the user selected for the restoration models."""
+        widget = self._widgets.get("compute_device")
+        if widget is None:
+            return 0
+        try:
+            return max(0, int(widget.get_value()))
+        except (TypeError, ValueError):
+            return 0
 
     def set_on_interactive_image_restore(self, callback: callable):
         self._on_interactive_image_restore = callback
@@ -404,3 +429,9 @@ class SettingsPanel(ctk.CTkFrame):
             except Exception:
                 logger.debug("Widget %r does not support state=%s", key, state, exc_info=True)
         self._model_section.set_enabled(enabled)
+        # Re-apply the TensorRT gate when re-enabling: on a card TensorRT cannot
+        # target the compile switch must stay locked off even after processing
+        # hands the settings back. (While processing, the loop above already
+        # disabled everything - nothing to re-apply there.)
+        if enabled:
+            self._basic_section.set_tensorrt_support(self._basic_section.tensorrt_supported)

@@ -77,6 +77,18 @@ class ValueOptionMenu(ctk.CTkOptionMenu):
             label = next(iter(self._value_to_label.values()))
         self.set(label)
 
+    def set_options(self, options: dict[str, str], *, keep_value: str | None = None):
+        """Replace the value->label mapping in place, keeping the selection.
+
+        Used to annotate entries once a background hardware probe reports which
+        codec backends this machine can actually use.
+        """
+        current = keep_value if keep_value is not None else self.get_value()
+        self._value_to_label = dict(options)
+        self._label_to_value = {label: value for value, label in options.items()}
+        self.configure(values=list(self._value_to_label.values()))
+        self.set_value(current)
+
 
 def pack_rows(rows: list[tuple[tk.Misc, dict]], hidden: tuple[tk.Misc, ...]) -> None:
     """Pack ``rows`` (widget, pack options) in order, leaving out ``hidden``."""

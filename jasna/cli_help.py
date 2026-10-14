@@ -54,6 +54,24 @@ CLI_HELP: dict[str, str] = {
     "min_detection_duration": "Drop detections shorter than N frames as false positives. 0 disables (default: %(default)s)",
     "scene_detection": "Detect hard scene cuts and end all tracked mosaic clips at the cut, so no clip spans two different shots. (default: %(default)s)",
     "codec": "Offline output video codec (HLS streaming always uses H.264). Default: %(default)s",
+    "device": (
+        "CUDA device the restoration models run on, e.g. cuda:0 or cuda:1. Compiled TensorRT "
+        "engines are archived per GPU, so each device keeps its own set and switching cards "
+        "never reuses another card's engines."
+    ),
+    "decode_backend": (
+        "Which device decodes the input, independent of --codec-backend. One of: auto, "
+        "nvidia, qsv, amd, cpu. auto follows the encoder; cpu forces FFmpeg software "
+        "decoding, which is the fastest option on a machine whose GPUs have no usable "
+        "decoders. (default: %(default)s)"
+    ),
+    "codec_backend": (
+        "Which device does the video codec work (decode the source, encode the output); the "
+        "restoration models still run on --device. One of: auto, nvidia, qsv, amd, cpu. auto uses "
+        "the main GPU's encoder when it has one, otherwise the Intel integrated GPU, otherwise the "
+        "CPU. Choose qsv or cpu when the main GPU has no video engines (NVIDIA CMP mining cards "
+        "such as the 90HX). (default: %(default)s)"
+    ),
     "cq": (
         "Literal encoder quality target passed unchanged. Lower values improve "
         "quality and increase file size. NVIDIA defaults: H.264 25, HEVC 28, "

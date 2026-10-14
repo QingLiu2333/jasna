@@ -47,6 +47,7 @@ class Colors:
     
     # Text
     TEXT_PRIMARY = "#cbd5e1"   # Slate-300
+    TEXT_SECONDARY = "#94a3b8" # Slate-400 — muted hints, machine-readable details
     
     # Status indicators
     STATUS_PROCESSING = "#34d399" # Emerald-400

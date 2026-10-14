@@ -88,6 +88,24 @@ def install() -> None:
     )
     _add_message_drop_filter("torch.utils.flop_counter", "triton not found")
 
+    # FFmpeg's own logs reach Python through PyAV's "libav.<component>" loggers.
+    # Filters only run on the logger the record was created on, so the specific
+    # child loggers seen in practice have to be named.
+    #
+    # * The QSV backend deliberately asks for D3D11VA decoding first and falls
+    #   back to software when the device cannot be created (a CUDA context being
+    #   live is enough); VideoReader reports which path it took itself.
+    # * hevc_qsv/h264_qsv print the CQP note whenever `global_quality` arrives
+    #   through the codec options dictionary rather than the AVCodecContext
+    #   field. It was measured to work on this path (output size tracks the
+    #   value), so the note is misleading rather than actionable.
+    for _libav_logger in ("libav.hevc", "libav.h264", "libav.av1", "libav.hevc_qsv", "libav.h264_qsv"):
+        _add_message_drop_filter(_libav_logger, "hwaccel initialisation returned error")
+        _add_message_drop_filter(_libav_logger, "Using the constant quantization parameter (CQP) by default")
+        # NVDEC/D3D11VA rejecting the source because this GPU has no video
+        # engine; VideoReader logs the switch to software decoding itself.
+        _add_message_drop_filter(_libav_logger, "Hardware is lacking required capabilities")
+
     # tensorrt.plugin logs an "experimental" warning through TensorRT's C++
     # logger at import time (triggered by torch_tensorrt). It bypasses the
     # logging/warnings machinery, so the only way to mute it is to filter the

@@ -18,9 +18,11 @@ from jasna.engine_paths import (
     get_basicvsrpp_sub_engine_paths,
 )
 from jasna.trt.torch_tensorrt_export import (
+    EngineArchiveError,
     compile_and_save_torchtrt_dynamo,
     get_workspace_size_bytes,
     load_torchtrt_export,
+    uses_legacy_dynamo,
 )
 
 logger = logging.getLogger(__name__)
@@ -379,22 +381,46 @@ def load_sub_engines(
     device: torch.device,
     fp16: bool,
 ) -> tuple[dict[str, nn.Module], nn.Module, nn.Module] | None:
-    """Returns ``(loop_body_engines, preprocess, upsample)`` or *None*."""
+    """Returns ``(loop_body_engines, preprocess, upsample)`` or *None*.
+
+    Raises :class:`EngineArchiveError` when the files exist but cannot run on
+    ``device`` - the set is moved aside first, so the caller can rebuild it for
+    the card that is actually installed instead of failing the whole job.
+    """
     if not all_basicvsrpp_sub_engines_exist(model_weights_path, fp16):
         return None
     paths = get_basicvsrpp_sub_engine_paths(model_weights_path, fp16)
 
-    loop_body_engines: dict[str, nn.Module] = {}
-    for d in DIRECTIONS:
-        loop_body_engines[d] = load_torchtrt_export(
-            checkpoint_path=paths[f"loop_body_{d}"], device=device,
+    try:
+        loop_body_engines: dict[str, nn.Module] = {}
+        for d in DIRECTIONS:
+            loop_body_engines[d] = load_torchtrt_export(
+                checkpoint_path=paths[f"loop_body_{d}"], device=device,
+            )
+        preprocess_engine = load_torchtrt_export(
+            checkpoint_path=paths["preprocess"], device=device,
         )
-    preprocess_engine = load_torchtrt_export(
-        checkpoint_path=paths["preprocess"], device=device,
-    )
-    upsample_engine = load_torchtrt_export(
-        checkpoint_path=paths["upsample"], device=device,
-    )
+        upsample_engine = load_torchtrt_export(
+            checkpoint_path=paths["upsample"], device=device,
+        )
+    except EngineArchiveError as exc:
+        from jasna.engine_paths import (
+            quarantine_engine_archive,
+            quarantine_engine_archive_for_path,
+        )
+
+        moved = quarantine_engine_archive_for_path(exc.path, reason=exc.reason)
+        if moved is None:
+            moved = quarantine_engine_archive("basicvsrpp", reason=exc.reason)
+        logger.error(
+            "The BasicVSR++ sub-engines stored for this GPU cannot be used: %s\n"
+            "  %s",
+            exc.reason,
+            f"Moved them to {moved}; they will be recompiled."
+            if moved
+            else "They will be recompiled.",
+        )
+        raise
     return loop_body_engines, preprocess_engine, upsample_engine
 
 
@@ -657,7 +683,12 @@ class BasicVSRPlusPlusNetSplit(nn.Module):
 
         return out_batch.unsqueeze(0)
 
-    _PREPROCESS_MIN_BATCH = 3
+    # torch 2.5's tracer (the Volta stack) derives a "batch >= 5" guard for the
+    # preprocess graph where torch >= 2.6 accepts the declared 3, so the engine
+    # profile starts at 5 there — and this floor must match it, or a padded
+    # batch of 3 would fall outside the TensorRT shape range. The compile-side
+    # retry in trt/torch_tensorrt_export.py enforces the same bound.
+    _PREPROCESS_MIN_BATCH = 5 if uses_legacy_dynamo() else 3
 
     def _preprocess(
         self, lqs_flat: torch.Tensor

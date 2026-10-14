@@ -23,7 +23,15 @@ def open_containing_folder(path: Path, *, parent, select_file: bool = False) -> 
         command = ["xdg-open", str(folder)]
 
     try:
-        subprocess.Popen(command)
+        # Launchers take no input and their output is never read. Passing all three
+        # streams explicitly keeps Popen away from the process' own standard handles,
+        # which the frozen GUI leaves dangling after FreeConsole.
+        subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
     except OSError as exc:
         logger.warning("Could not open containing folder %s", folder, exc_info=True)
         messagebox.showerror(
@@ -38,10 +46,13 @@ def open_file(path: Path, *, parent) -> None:
     try:
         if system == "Windows":
             os.startfile(str(path))
-        elif system == "Darwin":
-            subprocess.Popen(["open", str(path)])
         else:
-            subprocess.Popen(["xdg-open", str(path)])
+            subprocess.Popen(
+                ["open" if system == "Darwin" else "xdg-open", str(path)],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
     except OSError as exc:
         logger.warning("Could not open file %s", path, exc_info=True)
         messagebox.showerror(

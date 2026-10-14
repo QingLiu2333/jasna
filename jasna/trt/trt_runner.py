@@ -1,12 +1,31 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
-import tensorrt as trt
+try:
+    import tensorrt as trt
+except ImportError:  # pragma: no cover - only in the TensorRT-free build
+    trt = None
 import torch
 
-from jasna.trt import _engine_io_names, _trt_dtype_to_torch, get_trt_logger
+from jasna.trt import _engine_io_names, _trt_dtype_to_torch, get_trt_logger, require_tensorrt
 from jasna.tensor_utils import pad_batch_with_last
+
+logger = logging.getLogger(__name__)
+
+
+class TrtEngineError(RuntimeError):
+    """An engine file on disk cannot be deserialized on this GPU.
+
+    TensorRT plans are tied to the card (and TensorRT build) that produced
+    them, so an engine copied from another machine is unreadable here. The
+    owning archive is moved aside so the caller can compile a fresh one.
+    """
+
+    def __init__(self, source: str, message: str) -> None:
+        self.source = str(source)
+        super().__init__(message)
 
 
 class TrtRunner:
@@ -41,10 +60,25 @@ class TrtRunner:
     ) -> None:
         self.device = device
 
+        require_tensorrt()
         self.runtime = trt.Runtime(get_trt_logger())
         self.engine = self.runtime.deserialize_cuda_engine(engine_bytes)
         if self.engine is None:
-            raise RuntimeError(f"Failed to deserialize TensorRT engine: {source}")
+            from jasna.engine_paths import quarantine_engine_archive_for_path
+
+            moved = quarantine_engine_archive_for_path(
+                source, reason="TensorRT could not deserialize the engine on this GPU"
+            )
+            raise TrtEngineError(
+                source,
+                "Failed to deserialize TensorRT engine: "
+                f"{source}. Engines are only valid on the GPU that built them; "
+                + (
+                    f"the archive was moved to {moved} and will be rebuilt."
+                    if moved
+                    else "it has to be rebuilt for this GPU."
+                ),
+            )
         self.context = self.engine.create_execution_context()
         if self.context is None:
             raise RuntimeError("Failed to create TensorRT execution context")

@@ -242,8 +242,17 @@ class PresetManager:
         self._last_output_folder: str = ""
         self._last_output_pattern: str = DEFAULT_OUTPUT_PATTERN
         self._system_check_passed_version: str = ""
+        # Which device does video codec work. Machine-level, not per preset: a
+        # preset made on a machine with working NVENC must not force NVENC on a
+        # machine whose compute GPU has no video engines.
+        self._codec_backend: str = "auto"
+        # Which device decodes; machine-level like the encoder choice.
+        self._decode_device: str = "auto"
+        # Which CUDA device runs the restoration models. Machine-level as well:
+        # device indices do not survive moving a preset between machines.
+        self._compute_device: int = 0
         self._load()
-        
+
     def _load(self):
         """Load user presets from settings.json."""
         path = get_settings_path()
@@ -258,6 +267,12 @@ class PresetManager:
             self._last_output_folder = data.get("last_output_folder", "")
             self._last_output_pattern = data.get("last_output_pattern", DEFAULT_OUTPUT_PATTERN)
             self._system_check_passed_version = data.get("system_check_passed_version", "")
+            self._codec_backend = str(data.get("codec_backend", "auto") or "auto")
+            self._decode_device = str(data.get("decode_device", "auto") or "auto")
+            try:
+                self._compute_device = max(0, int(data.get("compute_device", 0)))
+            except (TypeError, ValueError):
+                self._compute_device = 0
             
             for name, preset_dict in data.get("user_presets", {}).items():
                 try:
@@ -366,3 +381,59 @@ class PresetManager:
     def set_system_check_passed_version(self, version: str):
         self._system_check_passed_version = version or ""
         self._save(system_check_passed_version=self._system_check_passed_version)
+
+    def get_codec_backend(self) -> str:
+        """The machine-level codec backend selection."""
+        return self._codec_backend
+
+    def set_codec_backend(self, value: str):
+        self._codec_backend = str(value or "auto")
+        self._save(codec_backend=self._codec_backend)
+
+    def get_decode_device(self) -> str:
+        """The machine-level decode device selection."""
+        return self._decode_device
+
+    def set_decode_device(self, value: str):
+        self._decode_device = str(value or "auto")
+        self._save(decode_device=self._decode_device)
+
+    def get_compute_device(self) -> int:
+        """The machine-level CUDA device index the models run on."""
+        return self._compute_device
+
+    def set_compute_device(self, value: int):
+        try:
+            index = max(0, int(value))
+        except (TypeError, ValueError):
+            index = 0
+        self._compute_device = index
+        self._save(compute_device=index)
+
+
+def set_compute_device(index: int) -> None:
+    """Pin the CUDA device for the whole process.
+
+    The selection is held in ``jasna.os_utils`` so that the CLI, the system checks
+    and every ``compute_device()`` caller resolve the same card; applying it before
+    any model or engine path is resolved keeps the compute GPU, its per-GPU engine
+    archive and the GUI's display consistent.
+    """
+    global _active_compute_device
+    from jasna import os_utils
+
+    _active_compute_device = os_utils.set_compute_device_index(index)
+
+
+def active_compute_device() -> int:
+    return _active_compute_device
+
+
+_active_compute_device: int = 0
+
+
+def _apply_compute_device(index: int) -> None:
+    """Apply a device index. Kept for callers of the older private helper."""
+    from jasna import os_utils
+
+    os_utils.set_compute_device_index(index)

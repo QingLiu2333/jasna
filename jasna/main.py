@@ -27,6 +27,28 @@ CLI_RESTORATION_MODELS: dict[str, tuple[RestorationModelName, LtxModelName]] = {
 
 
 
+def _pin_engine_device(device: str) -> None:
+    """Bind engine paths to the CUDA device the job targets."""
+    from jasna import os_utils
+    from jasna.engine_paths import set_engine_device_index
+
+    text = str(device).strip()
+    if not text or text == "cpu":
+        set_engine_device_index(None)
+        return
+    if text.startswith("cuda:"):
+        text = text.split(":", 1)[1]
+    elif text == "cuda":
+        text = "0"
+    try:
+        index = int(text)
+    except ValueError:
+        index = 0
+    # Sets torch's current device and the engine-archive index, and records the
+    # index every other resolver (compute_device()) reports.
+    os_utils.set_compute_device_index(index)
+
+
 def _session_config_from_args(
     args: argparse.Namespace,
     *,
@@ -82,6 +104,8 @@ def _session_config_from_args(
         fmp4=bool(args.fmp4),
         disable_progress=bool(args.no_progress),
         working_dir=Path(args.working_directory) if args.working_directory else None,
+        codec_backend=str(getattr(args, "codec_backend", "auto")),
+        decode_backend=str(getattr(args, "decode_backend", "auto")),
     )
 
 
@@ -98,14 +122,13 @@ def _resolve_cli_encoder_settings(
     codec: str,
     vendor,
 ) -> dict[str, object]:
-    from jasna.accelerator import AcceleratorVendor
     from jasna.media.encoder_settings import parse_encoder_settings, validate_encoder_settings
     from jasna.media.encoder_settings import encoder_cq_spec, validate_encoder_cq
 
-    resolved_vendor = AcceleratorVendor(str(vendor))
+    resolved_vendor = str(vendor).strip().lower()
     settings = parse_encoder_settings(raw_settings)
     cq_aliases = {"cq"}
-    if resolved_vendor is AcceleratorVendor.AMD:
+    if resolved_vendor == "amd":
         cq_aliases.add("qvbr_quality_level")
     duplicates = sorted(cq_aliases & settings.keys())
     if len(duplicates) > 1:
@@ -132,7 +155,7 @@ def _resolve_cli_encoder_settings(
             vendor=resolved_vendor,
         )
     elif (
-        resolved_vendor is AcceleratorVendor.AMD
+        resolved_vendor == "amd"
         and "qvbr_quality_level" in settings
     ):
         settings["cq"] = validate_encoder_cq(
@@ -179,7 +202,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Directory for temporary files created while assembling segment output (default: the output video's directory)",
     )
     parser.add_argument("--batch-size", type=int, default=4)
-    parser.add_argument("--device", type=str, default="cuda:0")
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cuda:0",
+        help=CLI_HELP["device"],
+    )
     parser.add_argument(
         "--fp16",
         default=True,
@@ -411,12 +439,11 @@ def build_parser() -> argparse.ArgumentParser:
     detection.add_argument(
         "--detection-model",
         type=str,
-        default="rfdetr-v6",
+        default=None,
         help=(
-            "Detection model name. Installed models are discovered from model_weights/; "
-            "rfdetr-v6 (fast) and rfdetr-vr-v1 (VR180) are bundled with Jasna, "
-            "rfdetr-v6-large (higher quality) and zelefans-vr-yolo-v2 are optional downloads "
-            "(default: %(default)s)"
+            "Detection model name. Installed models are discovered from model_weights/. "
+            "When omitted, the best installed model is used and rfdetr-v6 is preferred "
+            "when present (default: %(default)s)"
         ),
     )
     detection.add_argument(
@@ -490,6 +517,20 @@ def build_parser() -> argparse.ArgumentParser:
         default="hevc",
         choices=["hevc", "h264", "av1"],
         help=CLI_HELP["codec"],
+    )
+    encoding.add_argument(
+        "--codec-backend",
+        type=lambda value: str(value).lower(),
+        default="auto",
+        choices=["auto", "nvidia", "qsv", "amd", "cpu"],
+        help=CLI_HELP["codec_backend"],
+    )
+    encoding.add_argument(
+        "--decode-backend",
+        type=lambda value: str(value).lower(),
+        default="auto",
+        choices=["auto", "nvidia", "qsv", "amd", "cpu"],
+        help=CLI_HELP["decode_backend"],
     )
     encoding.add_argument(
         "--cq",
@@ -892,18 +933,34 @@ def main() -> None:
         return
 
     from jasna.mosaic.detection_registry import (
+        DEFAULT_DETECTION_MODEL_NAME,
         coerce_detection_model_name,
         discover_available_detection_models,
         resolve_detection_model,
     )
 
-    if not str(args.detection_model_path).strip():
-        available = discover_available_detection_models()
-        requested = coerce_detection_model_name(str(args.detection_model))
-        if available and requested not in available:
-            print(f"Warning: detection model '{requested}' not found in model_weights/. Available: {', '.join(available)}")
+    available = discover_available_detection_models()
+    explicit_model = str(args.detection_model).strip() if args.detection_model else ""
+    has_explicit_path = bool(str(args.detection_model_path).strip())
+    if explicit_model:
+        requested_model = coerce_detection_model_name(explicit_model)
+        if not has_explicit_path and available and requested_model not in available:
+            print(
+                f"Warning: detection model '{requested_model}' not found in model_weights/. "
+                f"Available: {', '.join(available)}"
+            )
+    elif available and DEFAULT_DETECTION_MODEL_NAME not in available:
+        # No explicit choice and the upstream default is not installed: use the
+        # best model that is actually present instead of failing the job.
+        requested_model = available[0]
+        print(
+            f"Using installed detection model '{requested_model}' "
+            f"(model_weights/ has no {DEFAULT_DETECTION_MODEL_NAME})."
+        )
+    else:
+        requested_model = DEFAULT_DETECTION_MODEL_NAME
     detection_model_name, detection_model_path, detection_score_threshold = resolve_detection_model(
-        str(args.detection_model), str(args.detection_model_path), args.detection_score_threshold
+        requested_model, str(args.detection_model_path), args.detection_score_threshold
     )
 
     restoration_backend = CLI_RESTORATION_MODELS[args.restoration_model_name][0]
@@ -929,17 +986,34 @@ def main() -> None:
         )
 
     from jasna.accelerator import device_context, vendor_for_device
+    from jasna.media.codec_backend import normalize_codec_backend, set_codec_backend, set_decode_device
+
+    requested_backend = normalize_codec_backend(args.codec_backend)
+    set_codec_backend(requested_backend)
+    set_decode_device(normalize_codec_backend(getattr(args, "decode_backend", "auto")))
+    # Pin the per-GPU engine archive for the device this job runs on, before any
+    # engine path is resolved: engines built for another card must not be reused.
+    _pin_engine_device(str(args.device))
+    # Validate CQ and custom encoder settings against the backend that will
+    # actually encode. "auto" follows the compute GPU here; the encoder re-checks
+    # against the real choice (and degrades to software) at open time.
+    cq_backend = (
+        str(vendor_for_device(str(args.device)))
+        if requested_backend.value == "auto"
+        else requested_backend.value
+    )
 
     encoder_settings = _resolve_cli_encoder_settings(
         str(args.encoder_settings),
         cq=args.cq,
         codec=codec,
-        vendor=vendor_for_device(str(args.device)),
+        vendor=cq_backend,
     )
 
     if args.license_email and args.license_key:
-        from jasna.protection import license_store
-        license_store.set_license(args.license_email, args.license_key)
+        from jasna._licensing import license_store
+
+        license_store().set_license(args.license_email, args.license_key)
 
     lut_arg = str(args.lut).strip()
     if lut_arg and not Path(lut_arg).exists():

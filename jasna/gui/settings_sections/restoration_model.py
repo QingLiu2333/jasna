@@ -8,7 +8,13 @@ import customtkinter as ctk
 from jasna.gui.components import CollapsibleSection, Tooltip
 from jasna.gui.icons import CompactSwitch, NativeIconButton
 from jasna.gui.locales import t
-from jasna.gui.ltx_models import LtxModels, card_unavailable_reason, run_unavailable_reason, trial_only
+from jasna.gui.ltx_models import (
+    LtxModels,
+    card_unavailable_reason,
+    fast_unavailable_reason,
+    run_unavailable_reason,
+    trial_only,
+)
 from jasna.gui.settings_sections.widgets import ValueOptionMenu, add_setting_label, get_tooltip
 from jasna.gui.theme import Colors, Fonts, Sizing
 from jasna.ltx.model_files import LTX_MODELS
@@ -74,6 +80,9 @@ class RestorationModelSection:
         self._on_model_changed = on_model_changed
         self._ltx_models = ltx_models
         self._nvidia: bool | None = None
+        # None until the CUDA warm-up reports; LTX stays selectable in the meantime
+        # rather than being greyed out on a guess.
+        self._capability: tuple[int, int] | None = None
         self._enabled = True
 
         section = CollapsibleSection(parent, t("section_restoration_model"), expanded=True)
@@ -286,13 +295,18 @@ class RestorationModelSection:
     def unavailable_reason(self) -> str | None:
         """Why the chosen LTX model cannot restore right now (None when it can)."""
         return run_unavailable_reason(
-            self._ltx_models.state, self._ltx_model.get_value(), self._fast(), nvidia=self._nvidia, trial=self._trial()
+            self._ltx_models.state,
+            self._ltx_model.get_value(),
+            self._fast(),
+            nvidia=self._nvidia,
+            trial=self._trial(),
+            capability=self._capability,
         )
 
     def _refresh_widgets(self) -> None:
         state = self._ltx_models.state
         editable = self._enabled and not self._ltx_models.downloading
-        reason = card_unavailable_reason(nvidia=self._nvidia)
+        reason = card_unavailable_reason(nvidia=self._nvidia, capability=self._capability)
         self._cards["basicvsrpp"].set_enabled(editable)
         ltx_card = self._cards["ltx"]
         ltx_card.set_enabled(editable and reason is None)
@@ -322,7 +336,9 @@ class RestorationModelSection:
         """The chosen model, or BasicVSR++ when LTX cannot run; switches to the installed
         precision when only that one is there."""
         state = self._ltx_models.state
-        if self._model.get() != "ltx" or card_unavailable_reason(nvidia=self._nvidia) is not None:
+        if self._model.get() != "ltx" or card_unavailable_reason(
+            nvidia=self._nvidia, capability=self._capability
+        ) is not None:
             return "basicvsrpp"
         model, fast = self._ltx_model.get_value(), self._fast()
         if not self._trial() and not state.usable(model, fast) and state.installed(model, not fast):
@@ -347,9 +363,20 @@ class RestorationModelSection:
             self._refresh_widgets()
         self._refresh_download()
 
-    def set_gpu_support(self, *, nvidia: bool, blackwell: bool) -> None:
+    def set_gpu_support(
+        self, *, nvidia: bool, blackwell: bool, capability: tuple[int, int] | None = None
+    ) -> None:
+        """Record what the GPU can do.
+
+        ``capability`` decides whether LTX is offered at all (it is refused on Pascal
+        and older, whose missing tensor cores would force every layer through the
+        dequantised fallback) and ``blackwell`` whether the fast NVFP4 mode is
+        offered — the same conditions ``session_factory`` enforces at run time.
+        """
         self._nvidia = nvidia
-        if blackwell:
+        self._capability = capability
+        fast_reason = fast_unavailable_reason(gemms_available=blackwell)
+        if fast_reason is None:
             self._fast_row.pack(fill="x", before=self._large_row)
         else:
             self._set_fast(False)

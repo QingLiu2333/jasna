@@ -103,10 +103,12 @@ class FirstRunWizard(ctk.CTkToplevel):
             ("ascii_path", t("wizard_check_ascii_path")),
             ("ffprobe", t("wizard_check_ffprobe")),
             ("gpu", t("wizard_check_gpu")),
+            ("gpu_kernels", t("wizard_check_gpu_kernels")),
             ("cuda", t("wizard_check_cuda")),
             ("driver", t("wizard_check_driver")),
         ]
         if os.name == "nt":
+            checks.append(("os", t("wizard_check_os")))
             checks.append(("sysmem", t("wizard_check_sysmem")))
         
         for key, label in checks:
