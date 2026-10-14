@@ -1,3 +1,10 @@
+> **Fork note** — this is [`QingLiu2333/jasna`](https://github.com/QingLiu2333/jasna), a fork of
+> [Kruk2/jasna](https://github.com/Kruk2/jasna) that adds **pre-Turing GPU support (GTX 10-series /
+> Pascal, and Volta)**, selectable video encode/decode devices, and per-GPU TensorRT engine
+> archiving. The work lives on the [`pascal-support`](https://github.com/QingLiu2333/jasna/tree/pascal-support)
+> branch — see **[README-BUILD.md](README-BUILD.md)** for the full explanation, the build recipe and
+> the measured numbers. Upstream `main` is left untouched, so the fork stays easy to sync.
+
 > **The only places to get a genuine key for the paid models are [Buy Me a Coffee](https://buymeacoffee.com/kruk2) and [Unifans](https://app.unifans.io/c/kruk2).**
 >
 > **付费模型的正版密钥只能通过 [Buy Me a Coffee](https://buymeacoffee.com/kruk2) 或 [Unifans](https://app.unifans.io/c/kruk2) 获取。**
